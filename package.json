@@ -9,7 +9,10 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@tanstack/react-query": "^5.90.17",
+    "axios": "^1.13.2",
     "next": "16.1.2",
+    "next-pwa-pack": "^2.0.0",
     "react": "19.2.3",
     "react-dom": "19.2.3"
   },
