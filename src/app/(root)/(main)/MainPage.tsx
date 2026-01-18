@@ -16,6 +16,9 @@ export function MainPage() {
         <Link href={"/about"}>
           ABOUT
         </Link>
+        <Link href={"/cart"}>
+          CART
+        </Link>
         <div className="grid grid-cols-3 mt-8">
           {data?.map((item) => (
             <div key={item.id}>

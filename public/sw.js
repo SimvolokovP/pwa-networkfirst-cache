@@ -1,17 +1,24 @@
 // public/custom-sw.js
-const CACHE_NAME = "pages-cache-v4";
-const STATIC_ASSETS_CACHE = "static-assets-cache-v4";
-const API_CACHE_NAME = "api-cache-v3";
+const CACHE_NAME = "pages-cache-v5";
+const STATIC_ASSETS_CACHE = "static-assets-cache-v5";
+const API_CACHE_NAME = "api-cache-v5";
 const CACHE_WHITELIST = [CACHE_NAME, STATIC_ASSETS_CACHE, API_CACHE_NAME];
 
 // TTL настроек из вашего кода
-const TTL = 1 * 60 * 1000; // 10 minutes
-const OFFLINE_URL = "/offline.html";
+const TTL = 10 * 60 * 1000; // 10 minutes (исправлено с 1 на 10 минут)
+const OFFLINE_URL = "/offline"; // Изменено для Next.js
 
 let cacheDisabled = false;
 
-// Массив путей, которые не кэшируются
-const CACHE_EXCLUDE = ["/api/admin", "/api/sensitive", "/_next/static/chunks/pages/_error"];
+// Массив путей, которые не кэшируются (расширен)
+const CACHE_EXCLUDE = [
+  "/api/admin",
+  "/api/sensitive",
+  "/_next/static/chunks/pages/_error",
+  "/about",
+  "/cart",
+  "/offline" // offline страницу тоже не нужно кэшировать по запросу
+];
 
 // Константы для сообщений
 const MESSAGE_EVENT_TYPES = {
@@ -37,28 +44,28 @@ const isAPI = (request) => {
 // Проверка: является ли запрос статическим ресурсом Next.js
 const isNextStatic = (request) => {
   const url = new URL(request.url);
-  return url.pathname.includes('/_next/static/') || 
-         url.pathname.includes('/_next/image') ||
-         url.pathname.startsWith('/static/');
+  return url.pathname.includes('/_next/static/') ||
+    url.pathname.includes('/_next/image') ||
+    url.pathname.startsWith('/static/');
 };
 
 // Проверка: безопасен ли запрос для кэширования
 function isCacheableRequest(request) {
   const url = new URL(request.url);
-  
+
   // Пропускаем не-HTTP/HTTPS запросы
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
     return false;
   }
-  
+
   // Пропускаем служебные URL
   if (request.url.startsWith('chrome-extension://') ||
-      request.url.startsWith('chrome://') ||
-      request.url.startsWith('file://') ||
-      request.url.startsWith('about:')) {
+    request.url.startsWith('chrome://') ||
+    request.url.startsWith('file://') ||
+    request.url.startsWith('about:')) {
     return false;
   }
-  
+
   return true;
 }
 
@@ -67,11 +74,29 @@ function shouldCache(request) {
   if (!isCacheableRequest(request)) {
     return false;
   }
-  
+
   const url = new URL(request.url);
-  
+
   // Пропускаем исключенные пути
-  return !CACHE_EXCLUDE.some((path) => url.pathname.includes(path));
+  const shouldExclude = CACHE_EXCLUDE.some((path) => {
+    // Для точного совпадения путей
+    if (path === url.pathname) {
+      return true;
+    }
+    // Для проверки вхождения
+    if (path.includes('/') && url.pathname.includes(path)) {
+      return true;
+    }
+    return false;
+  });
+
+  return !shouldExclude;
+}
+
+// Проверка: является ли запрос offline страницей
+function isOfflinePage(request) {
+  const url = new URL(request.url);
+  return url.pathname === '/offline';
 }
 
 // Безопасное добавление в кэш
@@ -80,11 +105,18 @@ async function safeCachePut(cacheName, request, response) {
     if (!isCacheableRequest(request)) {
       return;
     }
-    
+
+    // Проверяем, не является ли это страницами /about или /cart
+    const url = new URL(request.url);
+    if (url.pathname === '/about' || url.pathname === '/cart') {
+      console.log(`[SW] ⚠️ Skipping cache for excluded page: ${url.pathname}`);
+      return;
+    }
+
     const cache = await caches.open(cacheName);
     const responseToCache = response.clone();
     await cache.put(request, responseToCache);
-    
+
     // Для HTML сохраняем timestamp
     if (isHTML(request)) {
       const timestampResponse = new Response(
@@ -93,7 +125,7 @@ async function safeCachePut(cacheName, request, response) {
       );
       await cache.put(request.url + ":ts", timestampResponse);
     }
-    
+
     console.log(`[SW] ✅ Cached: ${request.url} in ${cacheName}`);
   } catch (error) {
     console.error(`[SW] ❌ Failed to cache ${request.url}:`, error);
@@ -114,27 +146,27 @@ async function safeCacheMatch(cacheName, request) {
 // Network-first стратегия для API
 async function handleApiRequest(request) {
   const cache = await caches.open(API_CACHE_NAME);
-  
+
   try {
     // Пробуем сеть
     const networkResponse = await fetch(request);
-    
+
     // Кэшируем успешные ответы
     if (networkResponse.ok) {
       const responseToCache = networkResponse.clone();
       await cache.put(request, responseToCache);
     }
-    
+
     return networkResponse;
   } catch (error) {
     // Если нет сети, пробуем кэш
     const cachedResponse = await cache.match(request);
-    
+
     if (cachedResponse) {
       console.log(`[SW] Serving API from cache: ${request.url}`);
       return cachedResponse;
     }
-    
+
     // Если нет в кэше, возвращаем offline ответ
     return new Response(
       JSON.stringify({
@@ -155,69 +187,80 @@ async function handleApiRequest(request) {
   }
 }
 
-// Stale-while-revalidate стратегия для HTML (ваш подход)
+// Stale-while-revalidate стратегия для HTML
 async function handleHtmlRequest(request) {
+  const url = new URL(request.url);
+  
+  // Не кэшируем страницы /about и /cart
+  if (url.pathname === '/about' || url.pathname === '/cart') {
+    console.log(`[SW] ⚠️ Bypassing cache for excluded page: ${url.pathname}`);
+    return fetch(request);
+  }
+
+  // Не кэшируем offline страницу при прямом запросе
+  if (isOfflinePage(request)) {
+    return fetch(request);
+  }
+
   if (cacheDisabled || !shouldCache(request)) {
     return fetch(request);
   }
-  
+
   try {
     const cache = await caches.open(CACHE_NAME);
     const cachedResponse = await cache.match(request);
     const cachedTimestamp = await cache.match(request.url + ":ts");
-    
+
     let age = 0;
     if (cachedResponse && cachedTimestamp) {
       try {
         const timestampData = await cachedTimestamp.json();
         age = Date.now() - timestampData.ts;
-        
+
         // Если кэш свежий (< 10 минут) - возвращаем его
         if (age < TTL) {
-          console.log(`[SW] Serving fresh HTML cache: ${request.url} (${Math.floor(age/1000)}s old)`);
+          console.log(`[SW] Serving fresh HTML cache: ${request.url} (${Math.floor(age / 1000)}s old)`);
           return cachedResponse;
         }
-        
-        console.log(`[SW] HTML cache stale: ${request.url} (${Math.floor(age/1000)}s old)`);
+
+        console.log(`[SW] HTML cache stale: ${request.url} (${Math.floor(age / 1000)}s old)`);
       } catch (error) {
         console.error(`[SW] Error reading timestamp: ${request.url}`, error);
       }
     }
-    
+
     // Кэш устарел или отсутствует - пробуем сеть
     try {
       console.log(`[SW] Fetching fresh HTML: ${request.url}`);
       const response = await fetch(request);
-      
-      // Кэшируем успешные ответы
-      if (response.ok && response.status === 200) {
+
+      // Кэшируем только успешные ответы для разрешенных страниц
+      if (response.ok && response.status === 200 && shouldCache(request)) {
         await safeCachePut(CACHE_NAME, request, response);
       }
-      
+
       return response.clone();
     } catch (fetchError) {
       console.warn(`[SW] Fetch failed: ${request.url}`, fetchError);
-      
+
       // Если есть кэш - возвращаем его (даже старый)
       if (cachedResponse) {
         console.log(`[SW] Serving stale HTML cache: ${request.url}`);
         return cachedResponse;
       }
+
+      // Если нет кэша - редиректим на offline страницу
+      console.log(`[SW] Redirecting to offline page: ${request.url}`);
       
-      // Если нет кэша - показываем offline страницу
-      console.log(`[SW] Serving offline page: ${request.url}`);
-      const offlineResponse = await caches.match(OFFLINE_URL);
-      if (offlineResponse) {
-        return offlineResponse;
-      }
-      
-      return new Response(
-        '<h1>Offline</h1><p>You are offline. Please check your connection.</p>',
-        {
-          headers: { 'Content-Type': 'text/html' },
-          status: 503
+      // Создаем ответ с редиректом
+      return new Response(null, {
+        status: 302,
+        statusText: 'Found',
+        headers: {
+          'Location': '/offline',
+          'Cache-Control': 'no-store'
         }
-      );
+      });
     }
   } catch (error) {
     console.error(`[SW] Error processing HTML request: ${request.url}`, error);
@@ -227,24 +270,29 @@ async function handleHtmlRequest(request) {
 
 // Cache-first стратегия для статических ресурсов
 async function handleStaticRequest(request) {
+  // Не кэшируем статику для offline страницы (она уже закэширована при установке)
+  if (isOfflinePage(request)) {
+    return fetch(request);
+  }
+
   try {
     const cache = await caches.open(STATIC_ASSETS_CACHE);
     const cachedResponse = await cache.match(request);
-    
+
     if (cachedResponse) {
       console.log(`[SW] Serving static asset from cache: ${request.url}`);
       return cachedResponse;
     }
-    
+
     // Не в кэше - пробуем сеть
     try {
       const response = await fetch(request);
-      
+
       // Кэшируем успешные ответы
       if (response.ok) {
         await safeCachePut(STATIC_ASSETS_CACHE, request, response);
       }
-      
+
       return response;
     } catch (fetchError) {
       console.warn(`[SW] Failed to fetch static asset: ${request.url}`, fetchError);
@@ -262,13 +310,21 @@ self.addEventListener("install", (event) => {
   event.waitUntil(
     caches.open(STATIC_ASSETS_CACHE)
       .then((cache) => {
+        // Предварительно кэшируем offline страницу и её ресурсы
         const urlsToCache = [
-          OFFLINE_URL,
-          // Базовые статические ресурсы
+          // Главная страница offline
+          '/offline',
+          // Статика для offline страницы
+          '/_next/static/css/offline.css', // если есть
+          '/_next/static/images/offline.svg', // если есть
+          // Базовые ресурсы
           '/',
           '/manifest.json',
-        ];
-        
+          // Икони и шрифты
+          '/favicon.ico',
+          '/robots.txt',
+        ].filter(Boolean);
+
         return Promise.all(
           urlsToCache.map(url => {
             return cache.add(url).catch(err => {
@@ -309,20 +365,41 @@ self.addEventListener("activate", (event) => {
 // Обработка fetch запросов
 self.addEventListener("fetch", (event) => {
   const { request } = event;
-  
+
   // Пропускаем не-GET запросы
   if (request.method !== "GET") return;
-  
+
   // Пропускаем некэшируемые запросы
   if (!isCacheableRequest(request)) {
     return;
   }
+
+  const url = new URL(request.url);
   
+  // Специальная обработка для offline страницы
+  if (url.pathname === '/offline') {
+    // Для offline страницы используем кэш, если есть
+    event.respondWith(
+      caches.match('/offline')
+        .then(cached => cached || fetch(request))
+        .catch(() => new Response(
+          '<h1>Offline</h1><p>Please check your internet connection.</p>',
+          { headers: { 'Content-Type': 'text/html' } }
+        ))
+    );
+    return;
+  }
+
   // Выбираем стратегию в зависимости от типа запроса
   if (isAPI(request)) {
     event.respondWith(handleApiRequest(request));
   } else if (isHTML(request)) {
-    event.respondWith(handleHtmlRequest(request));
+    // Прямой fetch для страниц /about и /cart без кэширования
+    if (url.pathname === '/about' || url.pathname === '/cart') {
+      event.respondWith(fetch(request));
+    } else {
+      event.respondWith(handleHtmlRequest(request));
+    }
   } else if (isNextStatic(request)) {
     event.respondWith(handleStaticRequest(request));
   }
@@ -337,7 +414,7 @@ self.addEventListener("fetch", (event) => {
 // Обработка сообщений от клиента
 self.addEventListener("message", (event) => {
   const { type, url, ts, html } = event.data || {};
-  
+
   console.log(`[SW] 📨 Received message: ${type}`, { url });
 
   // Включение/выключение кэширования
@@ -345,7 +422,7 @@ self.addEventListener("message", (event) => {
     cacheDisabled = true;
     console.log('[SW] ⚠️ Cache disabled');
   }
-  
+
   if (type === MESSAGE_EVENT_TYPES.ENABLE_CACHE) {
     cacheDisabled = false;
     console.log('[SW] ✅ Cache enabled');
@@ -355,37 +432,45 @@ self.addEventListener("message", (event) => {
   if (type === MESSAGE_EVENT_TYPES.SKIP_WAITING) {
     console.log('[SW] ⏩ Skip waiting requested');
     self.skipWaiting();
-    
+
     // Уведомляем клиентов о обновлении
     event.source.postMessage({ type: 'FORCE_RELOAD' });
   }
 
   // Ревалидация URL
   if (type === MESSAGE_EVENT_TYPES.REVALIDATE_URL && url) {
-    console.log(`[SW] 🔄 Revalidating: ${url}`);
+    const requestUrl = new URL(url);
     
+    // Не ревалидируем страницы /about и /cart
+    if (requestUrl.pathname === '/about' || requestUrl.pathname === '/cart') {
+      console.log(`[SW] Skipping revalidation for excluded page: ${requestUrl.pathname}`);
+      return;
+    }
+
+    console.log(`[SW] 🔄 Revalidating: ${url}`);
+
     if (!isCacheableRequest(new Request(url))) {
       console.log(`[SW] Cannot revalidate non-cacheable URL: ${url}`);
       return;
     }
-    
+
     caches.open(CACHE_NAME).then(async (cache) => {
       try {
-        const response = await fetch(url, { 
-          headers: { 
+        const response = await fetch(url, {
+          headers: {
             'Accept': 'text/html',
             'Cache-Control': 'no-cache'
-          } 
+          }
         });
-        
+
         if (response.ok) {
           await safeCachePut(CACHE_NAME, new Request(url), response);
           console.log(`[SW] ✅ Successfully revalidated: ${url}`);
-          
+
           // Уведомляем клиент об успехе
-          event.source.postMessage({ 
+          event.source.postMessage({
             type: 'REVALIDATION_SUCCESS',
-            url 
+            url
           });
         } else {
           console.error(`[SW] Revalidation failed: ${url} - HTTP ${response.status}`);
@@ -399,19 +484,19 @@ self.addEventListener("message", (event) => {
   // Очистка статического кэша
   if (type === MESSAGE_EVENT_TYPES.CLEAR_STATIC_CACHE) {
     console.log("[SW] 🧹 Clearing static assets cache");
-    
+
     caches.open(STATIC_ASSETS_CACHE)
       .then(async (cache) => {
         const keys = await cache.keys();
         console.log(`[SW] Found ${keys.length} entries in static cache`);
-        
+
         await Promise.all(
           keys.map((key) => cache.delete(key))
         );
-        
+
         console.log("[SW] ✅ Static cache cleared");
-        
-        event.source.postMessage({ 
+
+        event.source.postMessage({
           type: 'CACHE_CLEARED',
           cache: 'static'
         });
@@ -423,18 +508,26 @@ self.addEventListener("message", (event) => {
 
   // Ручное кэширование HTML (для SPA)
   if (type === MESSAGE_EVENT_TYPES.CACHE_CURRENT_HTML && html && url) {
+    const requestUrl = new URL(url);
+    
+    // Не кэшируем страницы /about и /cart
+    if (requestUrl.pathname === '/about' || requestUrl.pathname === '/cart') {
+      console.log(`[SW] Cannot manually cache excluded page: ${requestUrl.pathname}`);
+      return;
+    }
+
     if (cacheDisabled) {
       console.log(`[SW] Skipping cache (disabled): ${url}`);
       return;
     }
-    
+
     if (!isCacheableRequest(new Request(url))) {
       console.log(`[SW] Cannot cache non-cacheable URL: ${url}`);
       return;
     }
-    
+
     console.log(`[SW] 📝 Manual HTML cache for: ${url}`);
-    
+
     caches.open(CACHE_NAME).then(async (cache) => {
       const existing = await cache.match(new Request(url));
       const existingTs = await cache.match(new Request(url + ":ts"));
@@ -453,7 +546,7 @@ self.addEventListener("message", (event) => {
       }
 
       const response = new Response(html, {
-        headers: { 
+        headers: {
           'Content-Type': 'text/html; charset=utf-8',
           'X-SW-Cached': 'true',
           'Cache-Control': 'public, max-age=0, must-revalidate'
