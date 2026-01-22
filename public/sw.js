@@ -4,13 +4,10 @@ const STATIC_ASSETS_CACHE = "static-assets-v6";
 const CACHE_WHITELIST = [HTML_CACHE_NAME, API_CACHE_NAME, STATIC_ASSETS_CACHE];
 const OFFLINE_URL = "/offline.html";
 
-// Исключения: эти пути вообще не будут обрабатываться логикой кэширования
 const CACHE_EXCLUDE = ["/admin", "/about", "/cart"];
 
 function shouldCache(request) {
   const url = new URL(request.url);
-
-  // Проверяем, не входит ли путь в список исключений
   const isExcluded = CACHE_EXCLUDE.some(path => url.pathname.startsWith(path));
   if (isExcluded) return false;
 
@@ -45,10 +42,9 @@ self.addEventListener("fetch", (event) => {
   const { request } = event;
   const url = new URL(request.url);
 
-  // Если метод не GET или путь в исключениях — просто пропускаем запрос в сеть
   if (request.method !== "GET" || !shouldCache(request)) return;
 
-  // --- СТРАТЕГИЯ ДЛЯ API (Network First) ---
+  // --- API (Network First) ---
   if (url.pathname.includes("/api/") || url.hostname.includes("googleapis.com")) {
     event.respondWith(
       fetch(request)
@@ -70,12 +66,25 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  // --- СТРАТЕГИЯ ДЛЯ HTML (Network ONLY с Fallback на offline.html) ---
+  // --- HTML (Network First, Fallback to Cache, then Fallback to Offline Page) ---
   if (request.headers.get("accept")?.includes("text/html")) {
     event.respondWith(
       fetch(request)
+        .then((response) => {
+          // Если сеть есть, сохраняем страницу в кэш
+          if (response.ok) {
+            const copy = response.clone();
+            caches.open(HTML_CACHE_NAME).then((cache) => cache.put(request, copy));
+          }
+          return response;
+        })
         .catch(async () => {
-          // Отдаем offline.html только если сети нет
+          // Если сети нет:
+          // 1. Ищем конкретно эту страницу в кэше
+          const cachedResponse = await caches.match(request);
+          if (cachedResponse) return cachedResponse;
+
+          // 2. Если страницы в кэше нет, отдаем заглушку offline.html
           const offlinePage = await caches.match(OFFLINE_URL);
           return offlinePage || new Response("Сеть недоступна", { status: 503 });
         })
@@ -83,7 +92,7 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  // --- СТРАТЕГИЯ ДЛЯ СТАТИКИ (Cache First) ---
+  // --- СТАТИКА (Cache First) ---
   event.respondWith(
     caches.match(request).then((cached) => {
       return (
