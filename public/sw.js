@@ -1,16 +1,16 @@
-const HTML_CACHE_NAME = "html-cache-v3";
-const API_CACHE_NAME = "api-data-v3"; // Новый кэш для запросов данных
-const STATIC_ASSETS_CACHE = "static-assets-v3";
+const HTML_CACHE_NAME = "html-cache-v4";
+const API_CACHE_NAME = "api-data-v4"; // Новый кэш для запросов данных
+const STATIC_ASSETS_CACHE = "static-assets-v4";
 const CACHE_WHITELIST = [HTML_CACHE_NAME, API_CACHE_NAME, STATIC_ASSETS_CACHE];
 const OFFLINE_URL = "/offline.html";
 
 // Исключения (не кэшируем)
-const CACHE_EXCLUDE = ["/admin", "/login"];
+const CACHE_EXCLUDE = ["/admin", "/about", "/cart"];
 
 function shouldCache(request) {
   const url = new URL(request.url);
   return (
-    url.origin === self.location.origin || 
+    url.origin === self.location.origin ||
     url.hostname.includes("googleapis.com") // Разрешаем кэш для Google Books API, если используешь его напрямую
   );
 }

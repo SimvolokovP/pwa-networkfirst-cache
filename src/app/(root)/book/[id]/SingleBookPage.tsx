@@ -1,13 +1,17 @@
 "use client";
 
+import { useGetBookById } from "@/hooks/useGetBookById";
+
 export function SingleCategoryPage() {
-  // if (isLoading) {
-  //   return <div className="container">Loading..</div>;
-  // }
+  const { data, isLoading } = useGetBookById();
+
+  if (isLoading) {
+    return <div className="container">Loading..</div>;
+  }
 
   return (
-    <main>
-      <div className="container">1</div>
-    </main>
+    <div>
+      <div className="container">{data?.data.saleInfo.buyLink}</div>
+    </div>
   );
 }
