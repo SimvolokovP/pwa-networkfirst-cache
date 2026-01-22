@@ -1,5 +1,6 @@
 "use client";
 
+import { BookDescr } from "@/components/BookDescr";
 import { useGetBookById } from "@/hooks/useGetBookById";
 
 export function SingleCategoryPage() {
@@ -11,7 +12,9 @@ export function SingleCategoryPage() {
 
   return (
     <div>
-      <div className="container">{data?.data.saleInfo.buyLink}</div>
+      <div className="container">
+        <BookDescr book={data?.data} />
+      </div>
     </div>
   );
 }

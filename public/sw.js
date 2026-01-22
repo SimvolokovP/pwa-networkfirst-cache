@@ -1,6 +1,6 @@
-const HTML_CACHE_NAME = "html-cache-v5";
-const API_CACHE_NAME = "api-data-v5";
-const STATIC_ASSETS_CACHE = "static-assets-v5";
+const HTML_CACHE_NAME = "html-cache-v6";
+const API_CACHE_NAME = "api-data-v6";
+const STATIC_ASSETS_CACHE = "static-assets-v6";
 const CACHE_WHITELIST = [HTML_CACHE_NAME, API_CACHE_NAME, STATIC_ASSETS_CACHE];
 const OFFLINE_URL = "/offline.html";
 
