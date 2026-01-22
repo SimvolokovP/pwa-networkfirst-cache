@@ -6,9 +6,22 @@ import { usePWAStatus } from "next-pwa-pack";
 import { useEffect, useState } from "react";
 
 export function MainPage() {
-  const [query, setQuery] = useState<string>("Football");
+  const [query, setQuery] = useState<string>("React");
   const { data, isLoading, refetch } = useGetBooks({ q: query });
   const { online } = usePWAStatus();
+
+  useEffect(() => {
+    if (!isLoading && data && online) {
+      const timeoutId = setTimeout(() => {
+        navigator.serviceWorker.controller?.postMessage({
+          type: "CACHE_CURRENT_HTML",
+          url: window.location.href,
+          html: document.documentElement.outerHTML,
+        });
+      }, 500); // Сохраняем через полсекунды после того, как данные отрисовались
+      return () => clearTimeout(timeoutId);
+    }
+  }, [data, isLoading, online]);
 
   useEffect(() => {
     if (isLoading) console.log(data);
