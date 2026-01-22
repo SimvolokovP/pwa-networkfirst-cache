@@ -1,6 +1,6 @@
-const HTML_CACHE_NAME = "html-cache-v2";
-const API_CACHE_NAME = "api-data-v2"; // Новый кэш для запросов данных
-const STATIC_ASSETS_CACHE = "static-assets-v2";
+const HTML_CACHE_NAME = "html-cache-v3";
+const API_CACHE_NAME = "api-data-v3"; // Новый кэш для запросов данных
+const STATIC_ASSETS_CACHE = "static-assets-v3";
 const CACHE_WHITELIST = [HTML_CACHE_NAME, API_CACHE_NAME, STATIC_ASSETS_CACHE];
 const OFFLINE_URL = "/offline.html";
 

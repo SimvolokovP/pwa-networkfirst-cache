@@ -2,6 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 import { Providers } from "./providers";
 import { PWAProvider } from "next-pwa-pack";
+import { Toaster } from "sonner";
+import { ConnectivityListener } from "@/components/ConnectivityListener";
 
 export const metadata: Metadata = {
   title: "Create Next App",
@@ -15,11 +17,13 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body
-        className={`antialiased`}
-      >
+      <body className={`antialiased`}>
         <PWAProvider>
-          <Providers>{children}</Providers>
+          <Providers>
+            <Toaster duration={1500} position="top-right" />
+            <ConnectivityListener />
+            {children}
+          </Providers>
         </PWAProvider>
       </body>
     </html>
