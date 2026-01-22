@@ -2,13 +2,12 @@
 
 
 export function MainPage() {
- 
+
 
   return (
     <main>
-      <div className="container">
-        Cart
-      </div>
+      
+      <div className="container">Cart</div>
     </main>
   );
 }

@@ -1,5 +1,5 @@
 import { Metadata } from "next";
-import { SingleCategoryPage } from "./SingleCategoryPage";
+import { SingleCategoryPage } from "./SingleBookPage";
 
 export const metadata: Metadata = {
   title: "Category",

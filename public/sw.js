@@ -1,569 +1,562 @@
-// public/custom-sw.js
-const CACHE_NAME = "pages-cache-v5";
-const STATIC_ASSETS_CACHE = "static-assets-cache-v5";
-const API_CACHE_NAME = "api-cache-v5";
+const CACHE_NAME = "html-cache-v9";
+const STATIC_ASSETS_CACHE = "static-assets-v9";
+const API_CACHE_NAME = "books-api-v9"; // Новый кэш для API
 const CACHE_WHITELIST = [CACHE_NAME, STATIC_ASSETS_CACHE, API_CACHE_NAME];
+const TTL = 10 * 60 * 1000; // 10 minutes
+const OFFLINE_URL = "/offline.html";
 
-// TTL настроек из вашего кода
-const TTL = 10 * 60 * 1000; // 10 minutes (исправлено с 1 на 10 минут)
-const OFFLINE_URL = "/offline"; // Изменено для Next.js
+// TTL для API кэша (можно установить дольше, например, 30 минут)
+const API_TTL = 30 * 60 * 1000; // 30 минут
 
 let cacheDisabled = false;
 
-// Массив путей, которые не кэшируются (расширен)
-const CACHE_EXCLUDE = [
-  "/api/admin",
-  "/api/sensitive",
-  "/_next/static/chunks/pages/_error",
-  "/about",
-  "/cart",
-  "/offline" // offline страницу тоже не нужно кэшировать по запросу
+const CACHE_EXCLUDE = ["/about"];
+
+// Обновленные паттерны для API
+const API_PATTERNS = [
+  /\/api\//i,
+  /\.json$/i,
+  /\/(categories|carts|products|users|orders)\b/i,
 ];
 
-// Константы для сообщений
+// Специальные паттерны для Google Books API
+const GOOGLE_BOOKS_PATTERNS = [
+  /^https:\/\/www\.googleapis\.com\/books\/v1\//i,
+  /volumes\?q=/i,
+  /volumes\//i,
+];
+
+const API_HEADERS = [
+  "application/json",
+  "application/xml",
+  "text/xml",
+];
+
+function shouldCache(request) {
+  return !CACHE_EXCLUDE.some((path) => request.url.includes(path));
+}
+
+// Проверяем, поддерживается ли схема URL для кэширования
+function isCacheableScheme(urlString) {
+  try {
+    const url = new URL(urlString);
+    return url.protocol === 'http:' || url.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+// Проверяем, является ли запрос к Google Books API
+function isGoogleBooksApiRequest(request) {
+  const url = new URL(request.url);
+  return GOOGLE_BOOKS_PATTERNS.some(pattern => pattern.test(url.toString()));
+}
+
+// Универсальная проверка на API запрос
+function isApiRequest(request) {
+  const url = new URL(request.url);
+
+  // Проверяем по паттернам URL
+  if (API_PATTERNS.some(pattern => pattern.test(url.pathname))) {
+    return true;
+  }
+
+  // Проверяем Google Books API
+  if (isGoogleBooksApiRequest(request)) {
+    return true;
+  }
+
+  // Проверяем заголовки Content-Type или Accept
+  const contentType = request.headers.get('Content-Type') || '';
+  const acceptHeader = request.headers.get('Accept') || '';
+
+  // Если запрос явно ожидает JSON/XML или отправляет JSON/XML
+  if (API_HEADERS.some(header =>
+    contentType.includes(header) || acceptHeader.includes(header)
+  )) {
+    return true;
+  }
+
+  return false;
+}
+
 const MESSAGE_EVENT_TYPES = {
   CACHE_CURRENT_HTML: "CACHE_CURRENT_HTML",
   REVALIDATE_URL: "REVALIDATE_URL",
   DISABLE_CACHE: "DISABLE_CACHE",
   ENABLE_CACHE: "ENABLE_CACHE",
   CLEAR_STATIC_CACHE: "CLEAR_STATIC_CACHE",
-  SKIP_WAITING: "SKIP_WAITING",
+  CLEAR_API_CACHE: "CLEAR_API_CACHE", // Новый тип сообщения
 };
 
-// Проверка: является ли запрос HTML
+// Check: is it HTML
 const isHTML = (request) => {
   return request.headers.get("accept")?.includes("text/html");
 };
 
-// Проверка: является ли запрос API
-const isAPI = (request) => {
-  const url = new URL(request.url);
-  return url.pathname.startsWith('/api/');
-};
-
-// Проверка: является ли запрос статическим ресурсом Next.js
-const isNextStatic = (request) => {
-  const url = new URL(request.url);
-  return url.pathname.includes('/_next/static/') ||
-    url.pathname.includes('/_next/image') ||
-    url.pathname.startsWith('/static/');
-};
-
-// Проверка: безопасен ли запрос для кэширования
-function isCacheableRequest(request) {
-  const url = new URL(request.url);
-
-  // Пропускаем не-HTTP/HTTPS запросы
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+// Проверяем, является ли запрос кэшируемым API
+function isCacheableApiRequest(request) {
+  // Не кэшируем POST, PUT, DELETE запросы
+  if (request.method !== "GET") {
     return false;
   }
 
-  // Пропускаем служебные URL
-  if (request.url.startsWith('chrome-extension://') ||
-    request.url.startsWith('chrome://') ||
-    request.url.startsWith('file://') ||
-    request.url.startsWith('about:')) {
-    return false;
+  // Проверяем, является ли это Google Books API
+  if (isGoogleBooksApiRequest(request)) {
+    return true;
   }
 
-  return true;
+  // Для других API можно добавить дополнительные проверки
+  return false;
 }
 
-// Проверка: нужно ли кэшировать этот запрос
-function shouldCache(request) {
-  if (!isCacheableRequest(request)) {
-    return false;
-  }
-
-  const url = new URL(request.url);
-
-  // Пропускаем исключенные пути
-  const shouldExclude = CACHE_EXCLUDE.some((path) => {
-    // Для точного совпадения путей
-    if (path === url.pathname) {
-      return true;
-    }
-    // Для проверки вхождения
-    if (path.includes('/') && url.pathname.includes(path)) {
-      return true;
-    }
-    return false;
-  });
-
-  return !shouldExclude;
-}
-
-// Проверка: является ли запрос offline страницей
-function isOfflinePage(request) {
-  const url = new URL(request.url);
-  return url.pathname === '/offline';
-}
-
-// Безопасное добавление в кэш
-async function safeCachePut(cacheName, request, response) {
-  try {
-    if (!isCacheableRequest(request)) {
-      return;
-    }
-
-    // Проверяем, не является ли это страницами /about или /cart
-    const url = new URL(request.url);
-    if (url.pathname === '/about' || url.pathname === '/cart') {
-      console.log(`[SW] ⚠️ Skipping cache for excluded page: ${url.pathname}`);
-      return;
-    }
-
-    const cache = await caches.open(cacheName);
-    const responseToCache = response.clone();
-    await cache.put(request, responseToCache);
-
-    // Для HTML сохраняем timestamp
-    if (isHTML(request)) {
-      const timestampResponse = new Response(
-        JSON.stringify({ ts: Date.now() }),
-        { headers: { 'Content-Type': 'application/json' } }
-      );
-      await cache.put(request.url + ":ts", timestampResponse);
-    }
-
-    console.log(`[SW] ✅ Cached: ${request.url} in ${cacheName}`);
-  } catch (error) {
-    console.error(`[SW] ❌ Failed to cache ${request.url}:`, error);
-  }
-}
-
-// Безопасное чтение из кэша
-async function safeCacheMatch(cacheName, request) {
-  try {
-    const cache = await caches.open(cacheName);
-    return await cache.match(request);
-  } catch (error) {
-    console.error(`[SW] ❌ Failed to match cache for ${request.url}:`, error);
-    return null;
-  }
-}
-
-// Network-first стратегия для API
+// Network-first стратегия для API (с fallback на кэш)
 async function handleApiRequest(request) {
   const cache = await caches.open(API_CACHE_NAME);
+  const url = request.url;
+  const cacheKey = request;
 
   try {
-    // Пробуем сеть
+    // Пытаемся получить свежие данные из сети
+    console.log(`[SW] Fetching API data from network: ${url}`);
     const networkResponse = await fetch(request);
 
-    // Кэшируем успешные ответы
+    // Если успешно, обновляем кэш
     if (networkResponse.ok) {
       const responseToCache = networkResponse.clone();
-      await cache.put(request, responseToCache);
+
+      // Сохраняем в кэш с timestamp
+      await cache.put(cacheKey, responseToCache);
+      await cache.put(
+        url + ":ts",
+        new Response(JSON.stringify({
+          ts: Date.now(),
+          url: url
+        }))
+      );
+
+      console.log(`[SW] API data cached: ${url}`);
+      return networkResponse;
     }
 
-    return networkResponse;
-  } catch (error) {
-    // Если нет сети, пробуем кэш
-    const cachedResponse = await cache.match(request);
+    // Если сетевой запрос неудачный, пробуем кэш
+    throw new Error(`HTTP ${networkResponse.status}`);
 
-    if (cachedResponse) {
-      console.log(`[SW] Serving API from cache: ${request.url}`);
-      return cachedResponse;
-    }
+  } catch (networkError) {
+    console.log(`[SW] Network failed, trying cache: ${url}`, networkError.message);
 
-    // Если нет в кэше, возвращаем offline ответ
-    return new Response(
-      JSON.stringify({
-        error: 'offline',
-        message: 'You are offline and no cached data is available',
-        timestamp: new Date().toISOString(),
-        endpoint: request.url
-      }),
-      {
-        status: 503,
-        statusText: 'Service Unavailable',
-        headers: {
-          'Content-Type': 'application/json',
-          'Cache-Control': 'no-store'
-        }
-      }
-    );
-  }
-}
+    // Пробуем получить данные из кэша
+    const cachedResponse = await cache.match(cacheKey);
+    const cachedTimestamp = await cache.match(url + ":ts");
 
-// Stale-while-revalidate стратегия для HTML
-async function handleHtmlRequest(request) {
-  const url = new URL(request.url);
-  
-  // Не кэшируем страницы /about и /cart
-  if (url.pathname === '/about' || url.pathname === '/cart') {
-    console.log(`[SW] ⚠️ Bypassing cache for excluded page: ${url.pathname}`);
-    return fetch(request);
-  }
-
-  // Не кэшируем offline страницу при прямом запросе
-  if (isOfflinePage(request)) {
-    return fetch(request);
-  }
-
-  if (cacheDisabled || !shouldCache(request)) {
-    return fetch(request);
-  }
-
-  try {
-    const cache = await caches.open(CACHE_NAME);
-    const cachedResponse = await cache.match(request);
-    const cachedTimestamp = await cache.match(request.url + ":ts");
-
-    let age = 0;
     if (cachedResponse && cachedTimestamp) {
       try {
         const timestampData = await cachedTimestamp.json();
-        age = Date.now() - timestampData.ts;
+        const age = Date.now() - timestampData.ts;
 
-        // Если кэш свежий (< 10 минут) - возвращаем его
-        if (age < TTL) {
-          console.log(`[SW] Serving fresh HTML cache: ${request.url} (${Math.floor(age / 1000)}s old)`);
-          return cachedResponse;
+        // Проверяем свежесть кэша
+        if (age < API_TTL) {
+          console.log(`[SW] Serving API from cache (${Math.floor(age / 1000)}s old): ${url}`);
+
+          // Добавляем заголовок, указывающий, что это кэшированные данные
+          const headers = new Headers(cachedResponse.headers);
+          headers.set('X-Cache', 'HIT');
+          headers.set('X-Cache-Age', `${Math.floor(age / 1000)}s`);
+
+          return new Response(cachedResponse.body, {
+            status: cachedResponse.status,
+            statusText: cachedResponse.statusText,
+            headers: headers
+          });
+        } else {
+          console.log(`[SW] API cache expired (${Math.floor(age / 1000)}s old): ${url}`);
         }
-
-        console.log(`[SW] HTML cache stale: ${request.url} (${Math.floor(age / 1000)}s old)`);
-      } catch (error) {
-        console.error(`[SW] Error reading timestamp: ${request.url}`, error);
+      } catch (e) {
+        console.warn(`[SW] Error reading cache timestamp: ${url}`, e);
       }
     }
 
-    // Кэш устарел или отсутствует - пробуем сеть
-    try {
-      console.log(`[SW] Fetching fresh HTML: ${request.url}`);
-      const response = await fetch(request);
+    // Если нет свежего кэша или кэша нет вообще
+    console.log(`[SW] No valid cache available for: ${url}`);
 
-      // Кэшируем только успешные ответы для разрешенных страниц
-      if (response.ok && response.status === 200 && shouldCache(request)) {
-        await safeCachePut(CACHE_NAME, request, response);
-      }
-
-      return response.clone();
-    } catch (fetchError) {
-      console.warn(`[SW] Fetch failed: ${request.url}`, fetchError);
-
-      // Если есть кэш - возвращаем его (даже старый)
-      if (cachedResponse) {
-        console.log(`[SW] Serving stale HTML cache: ${request.url}`);
-        return cachedResponse;
-      }
-
-      // Если нет кэша - редиректим на offline страницу
-      console.log(`[SW] Redirecting to offline page: ${request.url}`);
-      
-      // Создаем ответ с редиректом
-      return new Response(null, {
-        status: 302,
-        statusText: 'Found',
+    // Для Google Books API возвращаем специальный offline ответ
+    if (isGoogleBooksApiRequest(request)) {
+      return new Response(JSON.stringify({
+        error: {
+          code: 503,
+          message: "Service Unavailable - You are offline",
+          errors: [{
+            message: "Unable to fetch data from Google Books API. Please check your connection.",
+            domain: "global",
+            reason: "backendError"
+          }]
+        },
+        cachedBooks: [], // Можно добавить последние кэшированные книги
+        offline: true,
+        timestamp: new Date().toISOString()
+      }), {
+        status: 503,
         headers: {
-          'Location': '/offline',
-          'Cache-Control': 'no-store'
+          'Content-Type': 'application/json',
+          'X-Offline': 'true'
         }
       });
     }
-  } catch (error) {
-    console.error(`[SW] Error processing HTML request: ${request.url}`, error);
-    return fetch(request);
+
+    // Для других API возвращаем общий offline ответ
+    return new Response(JSON.stringify({
+      error: 'offline',
+      message: 'You are offline and no cached data is available',
+      timestamp: new Date().toISOString()
+    }), {
+      status: 503,
+      headers: { 'Content-Type': 'application/json' }
+    });
   }
 }
 
-// Cache-first стратегия для статических ресурсов
-async function handleStaticRequest(request) {
-  // Не кэшируем статику для offline страницы (она уже закэширована при установке)
-  if (isOfflinePage(request)) {
-    return fetch(request);
-  }
+// Stale-while-revalidate стратегия для Google Books API
+async function handleGoogleBooksRequest(request) {
+  const cache = await caches.open(API_CACHE_NAME);
+  const url = request.url;
+  const cacheKey = request;
 
-  try {
-    const cache = await caches.open(STATIC_ASSETS_CACHE);
-    const cachedResponse = await cache.match(request);
+  // Сначала пытаемся вернуть данные из кэша (если есть)
+  const cachedResponse = await cache.match(cacheKey);
+  const cachedTimestamp = await cache.match(url + ":ts");
 
-    if (cachedResponse) {
-      console.log(`[SW] Serving static asset from cache: ${request.url}`);
-      return cachedResponse;
-    }
-
-    // Не в кэше - пробуем сеть
+  // Если есть кэш, возвращаем его сразу (не дожидаясь сети)
+  if (cachedResponse && cachedTimestamp) {
     try {
-      const response = await fetch(request);
+      const timestampData = await cachedTimestamp.json();
+      const age = Date.now() - timestampData.ts;
 
-      // Кэшируем успешные ответы
-      if (response.ok) {
-        await safeCachePut(STATIC_ASSETS_CACHE, request, response);
+      // Добавляем заголовок о возрасте кэша
+      const headers = new Headers(cachedResponse.headers);
+      headers.set('X-Cache', 'HIT');
+      headers.set('X-Cache-Age', `${Math.floor(age / 1000)}s`);
+
+      // Создаем ответ с кэшированными данными
+      const response = new Response(cachedResponse.body, {
+        status: cachedResponse.status,
+        statusText: cachedResponse.statusText,
+        headers: headers
+      });
+
+      // В фоновом режиме обновляем кэш, если он устарел
+      if (age > API_TTL) {
+        console.log(`[SW] Cache stale, revalidating in background: ${url}`);
+
+        // Не блокируем ответ - обновляем кэш в фоне
+        fetch(request)
+          .then(async (networkResponse) => {
+            if (networkResponse.ok) {
+              await cache.put(cacheKey, networkResponse.clone());
+              await cache.put(
+                url + ":ts",
+                new Response(JSON.stringify({
+                  ts: Date.now(),
+                  url: url
+                }))
+              );
+              console.log(`[SW] Background cache updated: ${url}`);
+            }
+          })
+          .catch(err => {
+            console.log(`[SW] Background revalidation failed: ${url}`, err.message);
+          });
       }
 
+      console.log(`[SW] Serving Google Books API from cache: ${url}`);
       return response;
-    } catch (fetchError) {
-      console.warn(`[SW] Failed to fetch static asset: ${request.url}`, fetchError);
-      throw fetchError;
+
+    } catch (e) {
+      console.warn(`[SW] Error with cached response: ${url}`, e);
     }
-  } catch (error) {
-    console.error(`[SW] Error processing static asset: ${request.url}`, error);
-    throw error;
   }
+
+  // Если кэша нет или он поврежден, используем обычную network-first стратегию
+  return handleApiRequest(request);
 }
 
-// Установка Service Worker
+// Installation — cache offline.html
 self.addEventListener("install", (event) => {
-  console.log('[SW] ⚙️ Installing service worker');
   event.waitUntil(
-    caches.open(STATIC_ASSETS_CACHE)
-      .then((cache) => {
-        // Предварительно кэшируем offline страницу и её ресурсы
-        const urlsToCache = [
-          // Главная страница offline
-          '/offline',
-          // Статика для offline страницы
-          '/_next/static/css/offline.css', // если есть
-          '/_next/static/images/offline.svg', // если есть
-          // Базовые ресурсы
-          '/',
-          '/manifest.json',
-          // Икони и шрифты
-          '/favicon.ico',
-          '/robots.txt',
-        ].filter(Boolean);
+    Promise.all([
+      caches.open(STATIC_ASSETS_CACHE).then((cache) => {
+        return cache.addAll([OFFLINE_URL]);
+      }),
+      caches.open(API_CACHE_NAME).then((cache) => {
+        // Можно предзагрузить популярные запросы к Google Books API
+        const popularQueries = [
+          'https://www.googleapis.com/books/v1/volumes?q=javascript&maxResults=5',
+          'https://www.googleapis.com/books/v1/volumes?q=react&maxResults=5',
+          'https://www.googleapis.com/books/v1/volumes?q=programming&maxResults=5'
+        ];
 
-        return Promise.all(
-          urlsToCache.map(url => {
-            return cache.add(url).catch(err => {
-              console.warn(`[SW] Failed to cache ${url}:`, err);
-            });
-          })
+        return Promise.allSettled(
+          popularQueries.map(url =>
+            fetch(url).then(response => {
+              if (response.ok) {
+                return cache.put(url, response.clone());
+              }
+            }).catch(() => { })
+          )
         );
       })
-      .then(() => {
-        console.log('[SW] ✅ Installation complete');
-        return self.skipWaiting();
-      })
+    ])
   );
+  self.skipWaiting();
 });
 
-// Активация Service Worker
+// Activation — take control immediately
 self.addEventListener("activate", (event) => {
-  console.log('[SW] 🔄 Activating service worker');
   event.waitUntil(
-    caches.keys()
+    caches
+      .keys()
       .then((cacheNames) => {
         return Promise.all(
           cacheNames
             .filter((cacheName) => !CACHE_WHITELIST.includes(cacheName))
-            .map((cacheName) => {
-              console.log(`[SW] Deleting old cache: ${cacheName}`);
-              return caches.delete(cacheName);
-            })
+            .map((cacheName) => caches.delete(cacheName))
         );
       })
-      .then(() => {
-        console.log('[SW] Claiming clients');
-        return self.clients.claim();
-      })
+      .then(() => self.clients.claim())
   );
 });
 
-// Обработка fetch запросов
+// Processing fetch requests
 self.addEventListener("fetch", (event) => {
   const { request } = event;
 
-  // Пропускаем не-GET запросы
-  if (request.method !== "GET") return;
+  // Пропускаем неподдерживаемые схемы
+  if (!isCacheableScheme(request.url)) {
+    return;
+  }
 
-  // Пропускаем некэшируемые запросы
-  if (!isCacheableRequest(request)) {
+  // Пропускаем не-GET запросы
+  if (request.method !== "GET") {
+    return;
+  }
+
+  // Проверяем, является ли это Google Books API запросом
+  if (isGoogleBooksApiRequest(request)) {
+    event.respondWith(handleGoogleBooksRequest(request));
+    return;
+  }
+
+  // Для других API используем обычную обработку
+  if (isApiRequest(request) && !isGoogleBooksApiRequest(request)) {
+    console.log('[SW] Skipping non-Books API request:', request.url);
     return;
   }
 
   const url = new URL(request.url);
-  
-  // Специальная обработка для offline страницы
-  if (url.pathname === '/offline') {
-    // Для offline страницы используем кэш, если есть
+
+  // Проверяем, не является ли запрос страницей about
+  if (url.pathname === '/about' || url.pathname.startsWith('/about/')) {
     event.respondWith(
-      caches.match('/offline')
-        .then(cached => cached || fetch(request))
-        .catch(() => new Response(
-          '<h1>Offline</h1><p>Please check your internet connection.</p>',
-          { headers: { 'Content-Type': 'text/html' } }
-        ))
+      fetch(request)
+        .then(async (response) => {
+          return response;
+        })
+        .catch(() => {
+          return caches.match(OFFLINE_URL);
+        })
     );
     return;
   }
 
-  // Выбираем стратегию в зависимости от типа запроса
-  if (isAPI(request)) {
-    event.respondWith(handleApiRequest(request));
-  } else if (isHTML(request)) {
-    // Прямой fetch для страниц /about и /cart без кэширования
-    if (url.pathname === '/about' || url.pathname === '/cart') {
-      event.respondWith(fetch(request));
-    } else {
-      event.respondWith(handleHtmlRequest(request));
-    }
-  } else if (isNextStatic(request)) {
-    event.respondWith(handleStaticRequest(request));
+  if (cacheDisabled || !shouldCache(request)) {
+    return;
   }
-  // Для остальных запросов используем CacheFirst
+
+  // HTML pages - Network First стратегия
+  if (isHTML(request)) {
+    event.respondWith(
+      (async () => {
+        try {
+          const networkResponse = await fetch(request);
+
+          if (networkResponse.ok && isCacheableScheme(request.url)) {
+            const cache = await caches.open(CACHE_NAME);
+            await cache.put(request, networkResponse.clone());
+            await cache.put(
+              request.url + ":ts",
+              new Response(JSON.stringify({ ts: Date.now() }))
+            );
+          }
+
+          return networkResponse;
+        } catch (error) {
+          const cache = await caches.open(CACHE_NAME);
+          const cachedResponse = await cache.match(request);
+
+          if (cachedResponse) {
+            console.log('[SW] Serving from cache (network failed):', request.url);
+            return cachedResponse;
+          }
+
+          const fallback = await caches.match(OFFLINE_URL);
+          return fallback || new Response("Offline", { status: 503 });
+        }
+      })()
+    );
+  }
+
+  // Static assets - Cache First
   else {
     event.respondWith(
-      handleStaticRequest(request).catch(() => fetch(request))
+      caches.open(STATIC_ASSETS_CACHE).then((cache) =>
+        cache.match(request).then((cached) => {
+          return (
+            cached ||
+            fetch(request)
+              .then((response) => {
+                if (response.status === 200 && isCacheableScheme(request.url)) {
+                  cache.put(request, response.clone());
+                }
+                return response;
+              })
+              .catch(() => undefined)
+          );
+        })
+      )
     );
   }
 });
 
-// Обработка сообщений от клиента
+// Processing messages from the client
 self.addEventListener("message", (event) => {
   const { type, url, ts, html } = event.data || {};
 
-  console.log(`[SW] 📨 Received message: ${type}`, { url });
-
-  // Включение/выключение кэширования
+  // Global enable/disable caching
   if (type === MESSAGE_EVENT_TYPES.DISABLE_CACHE) {
     cacheDisabled = true;
-    console.log('[SW] ⚠️ Cache disabled');
   }
-
   if (type === MESSAGE_EVENT_TYPES.ENABLE_CACHE) {
     cacheDisabled = false;
-    console.log('[SW] ✅ Cache enabled');
   }
 
-  // Быстрая активация нового Service Worker
-  if (type === MESSAGE_EVENT_TYPES.SKIP_WAITING) {
-    console.log('[SW] ⏩ Skip waiting requested');
+  // Fast activation of a new service worker
+  if (type === "SKIP_WAITING") {
     self.skipWaiting();
-
-    // Уведомляем клиентов о обновлении
-    event.source.postMessage({ type: 'FORCE_RELOAD' });
   }
 
-  // Ревалидация URL
+  // Очистка кэша Google Books API
+  if (type === MESSAGE_EVENT_TYPES.CLEAR_API_CACHE) {
+    console.log("[SW] Clearing Google Books API cache");
+    caches.open(API_CACHE_NAME)
+      .then(async (cache) => {
+        const keys = await cache.keys();
+        console.log(`[SW] Found ${keys.length} entries in API cache`);
+
+        // Удаляем только Google Books API записи
+        const deletePromises = keys.map(async (key) => {
+          const requestUrl = key.url || key;
+          if (isGoogleBooksApiRequest(new Request(requestUrl))) {
+            await cache.delete(key);
+            // Также удаляем timestamp
+            await cache.delete(requestUrl + ":ts");
+          }
+        });
+
+        await Promise.all(deletePromises);
+        console.log("[SW] Google Books API cache cleared");
+
+        // Уведомляем клиент
+        event.source.postMessage({
+          type: 'API_CACHE_CLEARED',
+          timestamp: new Date().toISOString()
+        });
+      })
+      .catch((err) => {
+        console.error("[SW] Error clearing API cache:", err);
+      });
+  }
+
+  // Invalidation by URL to update the cache manually
   if (type === MESSAGE_EVENT_TYPES.REVALIDATE_URL && url) {
-    const requestUrl = new URL(url);
-    
-    // Не ревалидируем страницы /about и /cart
-    if (requestUrl.pathname === '/about' || requestUrl.pathname === '/cart') {
-      console.log(`[SW] Skipping revalidation for excluded page: ${requestUrl.pathname}`);
-      return;
-    }
-
-    console.log(`[SW] 🔄 Revalidating: ${url}`);
-
-    if (!isCacheableRequest(new Request(url))) {
-      console.log(`[SW] Cannot revalidate non-cacheable URL: ${url}`);
+    if (!isCacheableScheme(url) || isApiRequest(new Request(url))) {
+      console.log("[SW] Skipping revalidation for API/unsupported scheme:", url);
       return;
     }
 
     caches.open(CACHE_NAME).then(async (cache) => {
       try {
-        const response = await fetch(url, {
-          headers: {
-            'Accept': 'text/html',
-            'Cache-Control': 'no-cache'
-          }
-        });
-
-        if (response.ok) {
-          await safeCachePut(CACHE_NAME, new Request(url), response);
-          console.log(`[SW] ✅ Successfully revalidated: ${url}`);
-
-          // Уведомляем клиент об успехе
-          event.source.postMessage({
-            type: 'REVALIDATION_SUCCESS',
-            url
-          });
-        } else {
-          console.error(`[SW] Revalidation failed: ${url} - HTTP ${response.status}`);
-        }
+        const response = await fetch(url, { headers: { Accept: "text/html" } });
+        await cache.put(url, response.clone());
+        await cache.put(
+          url + ":ts",
+          new Response(JSON.stringify({ ts: Date.now() }))
+        );
+        console.log("[SW] Revalidated and updated cache for:", url);
       } catch (err) {
-        console.error(`[SW] ❌ Failed to revalidate ${url}:`, err);
+        console.error("[SW] Failed to revalidate cache for:", url, err);
       }
     });
   }
 
-  // Очистка статического кэша
+  // Clear static assets cache
   if (type === MESSAGE_EVENT_TYPES.CLEAR_STATIC_CACHE) {
-    console.log("[SW] 🧹 Clearing static assets cache");
-
-    caches.open(STATIC_ASSETS_CACHE)
+    console.log("[SW] Received CLEAR_STATIC_CACHE message");
+    caches
+      .open(STATIC_ASSETS_CACHE)
       .then(async (cache) => {
         const keys = await cache.keys();
-        console.log(`[SW] Found ${keys.length} entries in static cache`);
-
-        await Promise.all(
-          keys.map((key) => cache.delete(key))
+        console.log(
+          "[SW] Found",
+          keys.length,
+          "entries in static assets cache"
         );
-
-        console.log("[SW] ✅ Static cache cleared");
-
-        event.source.postMessage({
-          type: 'CACHE_CLEARED',
-          cache: 'static'
-        });
+        await Promise.all(keys.map((key) => cache.delete(key)));
+        console.log("[SW] Cleared static assets cache");
       })
       .catch((err) => {
-        console.error("[SW] ❌ Error clearing static cache:", err);
+        console.error("[SW] Error clearing static assets cache:", err);
       });
   }
 
-  // Ручное кэширование HTML (для SPA)
+  // SPA: manually cache HTML
   if (type === MESSAGE_EVENT_TYPES.CACHE_CURRENT_HTML && html && url) {
-    const requestUrl = new URL(url);
-    
-    // Не кэшируем страницы /about и /cart
-    if (requestUrl.pathname === '/about' || requestUrl.pathname === '/cart') {
-      console.log(`[SW] Cannot manually cache excluded page: ${requestUrl.pathname}`);
-      return;
-    }
-
     if (cacheDisabled) {
-      console.log(`[SW] Skipping cache (disabled): ${url}`);
+      console.log("[SW] Skipping cache (cacheDisabled):", url);
       return;
     }
 
-    if (!isCacheableRequest(new Request(url))) {
-      console.log(`[SW] Cannot cache non-cacheable URL: ${url}`);
+    if (!isCacheableScheme(url) || isApiRequest(new Request(url))) {
+      console.log("[SW] Skipping cache for API/unsupported scheme:", url);
       return;
     }
 
-    console.log(`[SW] 📝 Manual HTML cache for: ${url}`);
+    if (url.includes('/about')) {
+      console.log("[SW] Skipping cache for about page:", url);
+      return;
+    }
 
     caches.open(CACHE_NAME).then(async (cache) => {
-      const existing = await cache.match(new Request(url));
-      const existingTs = await cache.match(new Request(url + ":ts"));
+      const existing = await cache.match(url);
+      const existingTs = await cache.match(url + ":ts");
 
       if (existing && existingTs) {
-        try {
-          const timestampData = await existingTs.json();
-          const age = Date.now() - timestampData.ts;
-          if (age < TTL) {
-            console.log(`[SW] Skip caching ${url}, still fresh`);
-            return;
-          }
-        } catch (error) {
-          console.error(`[SW] Error reading timestamp: ${url}`, error);
+        const age = Date.now() - (await existingTs.json()).ts;
+        if (age < TTL) {
+          console.log("[SW] Skip caching, still fresh:", url);
+          return;
         }
       }
 
       const response = new Response(html, {
-        headers: {
-          'Content-Type': 'text/html; charset=utf-8',
-          'X-SW-Cached': 'true',
-          'Cache-Control': 'public, max-age=0, must-revalidate'
-        },
+        headers: { "Content-Type": "text/html" },
       });
 
-      await safeCachePut(CACHE_NAME, new Request(url), response);
-      console.log(`[SW] ✅ Manually cached HTML: ${url}`);
+      await cache.put(url, response.clone());
+      await cache.put(
+        url + ":ts",
+        new Response(JSON.stringify({ ts: ts || Date.now() }))
+      );
+
+      console.log("[SW] Cached:", url);
     });
   }
-});
-
-// Глобальные обработчики ошибок
-self.addEventListener('error', (event) => {
-  console.error('[SW] 🚨 Global error:', event.error);
-});
-
-self.addEventListener('unhandledrejection', (event) => {
-  console.error('[SW] 🚨 Unhandled promise rejection:', event.reason);
 });
