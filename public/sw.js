@@ -1,21 +1,25 @@
-const HTML_CACHE_NAME = "html-cache-v4";
-const API_CACHE_NAME = "api-data-v4"; // Новый кэш для запросов данных
-const STATIC_ASSETS_CACHE = "static-assets-v4";
+const HTML_CACHE_NAME = "html-cache-v5";
+const API_CACHE_NAME = "api-data-v5";
+const STATIC_ASSETS_CACHE = "static-assets-v5";
 const CACHE_WHITELIST = [HTML_CACHE_NAME, API_CACHE_NAME, STATIC_ASSETS_CACHE];
 const OFFLINE_URL = "/offline.html";
 
-// Исключения (не кэшируем)
+// Исключения: эти пути вообще не будут обрабатываться логикой кэширования
 const CACHE_EXCLUDE = ["/admin", "/about", "/cart"];
 
 function shouldCache(request) {
   const url = new URL(request.url);
+
+  // Проверяем, не входит ли путь в список исключений
+  const isExcluded = CACHE_EXCLUDE.some(path => url.pathname.startsWith(path));
+  if (isExcluded) return false;
+
   return (
     url.origin === self.location.origin ||
-    url.hostname.includes("googleapis.com") // Разрешаем кэш для Google Books API, если используешь его напрямую
+    url.hostname.includes("googleapis.com")
   );
 }
 
-// 1. Установка
 self.addEventListener("install", (event) => {
   event.waitUntil(
     caches.open(STATIC_ASSETS_CACHE).then((cache) => {
@@ -25,7 +29,6 @@ self.addEventListener("install", (event) => {
   self.skipWaiting();
 });
 
-// 2. Активация (удаление старых кэшей)
 self.addEventListener("activate", (event) => {
   event.waitUntil(
     caches.keys().then((cacheNames) => {
@@ -38,12 +41,12 @@ self.addEventListener("activate", (event) => {
   );
 });
 
-// 3. Основная обработка запросов
 self.addEventListener("fetch", (event) => {
   const { request } = event;
   const url = new URL(request.url);
 
-  if (request.method !== "GET") return;
+  // Если метод не GET или путь в исключениях — просто пропускаем запрос в сеть
+  if (request.method !== "GET" || !shouldCache(request)) return;
 
   // --- СТРАТЕГИЯ ДЛЯ API (Network First) ---
   if (url.pathname.includes("/api/") || url.hostname.includes("googleapis.com")) {
@@ -52,10 +55,7 @@ self.addEventListener("fetch", (event) => {
         .then((response) => {
           if (response.ok) {
             const copy = response.clone();
-            caches.open(API_CACHE_NAME).then((cache) => {
-              // put автоматически перезаписывает старый ответ для данного URL (включая query-параметры)
-              cache.put(request, copy);
-            });
+            caches.open(API_CACHE_NAME).then((cache) => cache.put(request, copy));
           }
           return response;
         })
@@ -70,20 +70,14 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  // --- СТРАТЕГИЯ ДЛЯ HTML (Network First) ---
+  // --- СТРАТЕГИЯ ДЛЯ HTML (Network ONLY с Fallback на offline.html) ---
   if (request.headers.get("accept")?.includes("text/html")) {
     event.respondWith(
       fetch(request)
-        .then((response) => {
-          if (response.ok) {
-            const copy = response.clone();
-            caches.open(HTML_CACHE_NAME).then((cache) => cache.put(request, copy));
-          }
-          return response;
-        })
         .catch(async () => {
-          const cachedResponse = await caches.match(request);
-          return cachedResponse || caches.match(OFFLINE_URL);
+          // Отдаем offline.html только если сети нет
+          const offlinePage = await caches.match(OFFLINE_URL);
+          return offlinePage || new Response("Сеть недоступна", { status: 503 });
         })
     );
     return;
@@ -95,7 +89,7 @@ self.addEventListener("fetch", (event) => {
       return (
         cached ||
         fetch(request).then((response) => {
-          if (response.ok && shouldCache(request)) {
+          if (response.ok) {
             const copy = response.clone();
             caches.open(STATIC_ASSETS_CACHE).then((cache) => cache.put(request, copy));
           }
@@ -106,21 +100,8 @@ self.addEventListener("fetch", (event) => {
   );
 });
 
-// 4. Сообщения от клиента
 self.addEventListener("message", (event) => {
-  const { type, url, html } = event.data || {};
-
+  const { type } = event.data || {};
   if (type === "SKIP_WAITING") self.skipWaiting();
-
-  // Сохранение HTML из SPA навигации
-  if (type === "CACHE_CURRENT_HTML" && html && url) {
-    caches.open(HTML_CACHE_NAME).then((cache) => {
-      cache.put(url, new Response(html, { headers: { "Content-Type": "text/html" } }));
-    });
-  }
-
-  // Очистка кэша API (если нужно принудительно обновить данные)
-  if (type === "CLEAR_API_CACHE") {
-    caches.delete(API_CACHE_NAME);
-  }
+  if (type === "CLEAR_API_CACHE") caches.delete(API_CACHE_NAME);
 });
