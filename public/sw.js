@@ -1,10 +1,16 @@
-const HTML_CACHE_NAME = "html-cache-v6";
-const API_CACHE_NAME = "api-data-v6";
-const STATIC_ASSETS_CACHE = "static-assets-v6";
+const VERSION = 'v6.1.2';
+const HTML_CACHE_NAME = `html-cache-${VERSION}`;
+const API_CACHE_NAME = `api-data-${VERSION}`;
+const STATIC_ASSETS_CACHE = `static-assets-${VERSION}`;
 const CACHE_WHITELIST = [HTML_CACHE_NAME, API_CACHE_NAME, STATIC_ASSETS_CACHE];
-const OFFLINE_URL = "/offline.html";
 
+const OFFLINE_URL = "/offline.html";
 const CACHE_EXCLUDE = ["/admin", "/about", "/cart"];
+
+const TTL_CONFIG = {
+  [HTML_CACHE_NAME]: 24 * 60 * 60 * 1000, 
+  [API_CACHE_NAME]: 12 * 60 * 60 * 1000,      
+};
 
 function shouldCache(request) {
   const url = new URL(request.url);
@@ -17,11 +23,41 @@ function shouldCache(request) {
   );
 }
 
+async function getValidCachedResponse(cacheName, request) {
+  const cache = await caches.open(cacheName);
+  const cachedResponse = await cache.match(request);
+  if (!cachedResponse) return null;
+
+  const dateHeader = cachedResponse.headers.get('sw-cache-timestamp');
+  if (!dateHeader) return cachedResponse;
+
+  const age = Date.now() - parseInt(dateHeader, 10);
+  const ttl = TTL_CONFIG[cacheName] || Infinity;
+
+  if (age > ttl) return null;
+  return cachedResponse;
+}
+
+async function cacheWithTimestamp(cacheName, request, response) {
+  const cache = await caches.open(cacheName);
+  const responseClone = response.clone(); 
+  
+  const headers = new Headers(responseClone.headers);
+  headers.append('sw-cache-timestamp', Date.now().toString());
+
+  const body = await responseClone.blob(); 
+  const responseToCache = new Response(body, {
+    status: responseClone.status,
+    statusText: responseClone.statusText,
+    headers: headers
+  });
+
+  await cache.put(request, responseToCache);
+}
+
 self.addEventListener("install", (event) => {
   event.waitUntil(
-    caches.open(STATIC_ASSETS_CACHE).then((cache) => {
-      return cache.addAll([OFFLINE_URL]);
-    })
+    caches.open(STATIC_ASSETS_CACHE).then((cache) => cache.addAll([OFFLINE_URL]))
   );
   self.skipWaiting();
 });
@@ -44,20 +80,19 @@ self.addEventListener("fetch", (event) => {
 
   if (request.method !== "GET" || !shouldCache(request)) return;
 
-  // --- API (Network First) ---
   if (url.pathname.includes("/api/") || url.hostname.includes("googleapis.com")) {
     event.respondWith(
       fetch(request)
-        .then((response) => {
-          if (response.ok) {
-            const copy = response.clone();
-            caches.open(API_CACHE_NAME).then((cache) => cache.put(request, copy));
+        .then(async (networkResponse) => {
+          if (networkResponse.ok) {
+            // Передаем оригинал, функция внутри сама сделает клон
+            await cacheWithTimestamp(API_CACHE_NAME, request, networkResponse);
           }
-          return response;
+          return networkResponse;
         })
         .catch(async () => {
-          const cachedResponse = await caches.match(request);
-          return cachedResponse || new Response(JSON.stringify({ error: "offline" }), {
+          const validResponse = await getValidCachedResponse(API_CACHE_NAME, request);
+          return validResponse || new Response(JSON.stringify({ error: "offline" }), {
             status: 503,
             headers: { "Content-Type": "application/json" }
           });
@@ -66,45 +101,41 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  // --- HTML (Network First, Fallback to Cache, then Fallback to Offline Page) ---
   if (request.headers.get("accept")?.includes("text/html")) {
     event.respondWith(
       fetch(request)
-        .then((response) => {
-          // Если сеть есть, сохраняем страницу в кэш
-          if (response.ok) {
-            const copy = response.clone();
-            caches.open(HTML_CACHE_NAME).then((cache) => cache.put(request, copy));
+        .then(async (networkResponse) => {
+          if (networkResponse.ok) {
+            await cacheWithTimestamp(HTML_CACHE_NAME, request, networkResponse);
           }
-          return response;
+          return networkResponse;
         })
         .catch(async () => {
-          // Если сети нет:
-          // 1. Ищем конкретно эту страницу в кэше
-          const cachedResponse = await caches.match(request);
-          if (cachedResponse) return cachedResponse;
-
-          // 2. Если страницы в кэше нет, отдаем заглушку offline.html
+          const validResponse = await getValidCachedResponse(HTML_CACHE_NAME, request);
+          if (validResponse) return validResponse;
           const offlinePage = await caches.match(OFFLINE_URL);
-          return offlinePage || new Response("Сеть недоступна", { status: 503 });
+          return offlinePage || new Response("Offline", { status: 503 });
         })
     );
     return;
   }
 
-  // --- СТАТИКА (Cache First) ---
   event.respondWith(
     caches.match(request).then((cached) => {
-      return (
-        cached ||
-        fetch(request).then((response) => {
-          if (response.ok) {
-            const copy = response.clone();
-            caches.open(STATIC_ASSETS_CACHE).then((cache) => cache.put(request, copy));
-          }
-          return response;
-        })
-      );
+      if (cached) return cached;
+
+      return fetch(request).then((networkResponse) => {
+        if (!networkResponse || networkResponse.status !== 200 || networkResponse.type !== 'basic') {
+          return networkResponse;
+        }
+        
+        const responseToCache = networkResponse.clone();
+        caches.open(STATIC_ASSETS_CACHE).then((cache) => {
+          cache.put(request, responseToCache);
+        });
+
+        return networkResponse;
+      });
     })
   );
 });
